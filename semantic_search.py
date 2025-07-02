@@ -19,6 +19,34 @@ COLLECTION_NAME = "bdlaws"
 # ✅ Qdrant connection
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
+def enrich_relevant_sections(relevant_sections: list, all_sections: list) -> list:
+    enriched = []
+
+    for entry in relevant_sections:
+        title = entry["title"].strip()
+
+        # Match actTitle + sectionTitle
+        for sec in all_sections:
+            full_title = f"{sec['actTitle'].strip()} > {sec['sectionTitle'].strip()}"
+            if full_title == title:
+                enriched.append({
+                    **entry,  # includes title, reason
+                    "actTitle": sec.get("actTitle"),
+                    "sectionTitle": sec.get("sectionTitle"),
+                    "chapterTitle": sec.get("chapterTitle"),
+                    "sectionUrl": sec.get("sectionUrl"),
+                    "actUrl": sec.get("actUrl"),
+                    "text": sec.get("text"),
+                    "actRepealed": sec.get("actRepealed"),
+                    "actPreamble": sec.get("actPreamble"),
+                    "actDate": sec.get("actDate"),
+                    "actSubtitle": sec.get("actSubtitle")
+                })
+                break
+
+    return enriched
+
+
 def call_openrouter_final_summary(query: str, chunk_responses: list) -> dict:
     prompt = f"""
     You are a legal assistant. A user asked the following question:
@@ -315,3 +343,28 @@ if __name__ == "__main__":
 
     print("\n🧠 Final Gemini Response:")
     print(json.dumps(final_analysis, indent=2, ensure_ascii=False))
+    
+    # Flatten all sections from grouped chapters
+    flat_sections = sum(chapter_grouped.values(), [])
+
+    # Enrich Gemini's response with full metadata
+    enriched_sections = enrich_relevant_sections(final_analysis["relevant_sections"], flat_sections)
+
+    # Optionally update final_analysis with enriched result
+    final_analysis["relevant_sections_full"] = enriched_sections
+
+    # Pretty print output
+    print("\n🧾 Enriched Relevant Sections:")
+    for i, sec in enumerate(enriched_sections, 1):
+        print(f"\n🔹 Section #{i}")
+        print(f"📌 {sec['title']}")
+        print(f"📚 Reason: {sec['reason']}")
+        print(f"🏛️ Act Title: {sec['actTitle']}")
+        print(f"📜 Section Title: {sec['sectionTitle']}")
+        print(f"📖 Chapter: {sec.get('chapterTitle')}")
+        print(f"📝 Text Preview: {sec['text'][:500]}...")
+        print(f"📖 Act URL: {sec['actUrl']}")
+        print(f"🔗 Section URL: {sec['sectionUrl']}")
+        print(f"📆 Act Date: {sec.get('actDate')}")
+        print(f"📝 Subtitle: {sec.get('actSubtitle')}")
+        print(f"🚫 Repealed: {sec.get('actRepealed')}")
