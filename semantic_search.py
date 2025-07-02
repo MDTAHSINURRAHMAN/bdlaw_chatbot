@@ -203,16 +203,55 @@ def get_all_sections_grouped_by_chapter_from_file(filepath="bdlaws_merged.json")
 
 
 
+# def expand_with_related_sections(top_matches: list, chapter_grouped: dict, neighbors: int = 10):
+#     """
+#     Expand legal context by:
+#     1. Fetching all sections from top N chapters
+#     2. If no chapter, fallback to ±neighbors using section index
+#     """
+#     related_sections = []
+#     seen_ids = set()
+
+#     # 1. Collect top 3 unique chapter titles
+#     top_chapters = []
+#     for match in top_matches:
+#         chap = match["payload"].get("chapterTitle", "").strip()
+#         if chap and chap not in top_chapters:
+#             top_chapters.append(chap)
+#         if len(top_chapters) >= 3:
+#             break
+
+#     # 2. Get all sections from those chapters
+#     for chap in top_chapters:
+#         for sec in chapter_grouped.get(chap, []):
+#             sec_id = sec['sectionUrl']
+#             if sec_id not in seen_ids:
+#                 related_sections.append(sec)
+#                 seen_ids.add(sec_id)
+
+#     # 3. If no chapter or section is flat, fallback to ±10
+#     all_flat = list(sum(chapter_grouped.values(), []))  # flatten all
+#     url_to_index = {s['sectionUrl']: idx for idx, s in enumerate(all_flat)}
+
+#     for match in top_matches[:3]:
+#         sec_id = match["payload"]["sectionUrl"]
+#         idx = url_to_index.get(sec_id, None)
+#         if idx is not None:
+#             for i in range(max(0, idx - neighbors), min(len(all_flat), idx + neighbors + 1)):
+#                 sec = all_flat[i]
+#                 sec_id = sec['sectionUrl']
+#                 if sec_id not in seen_ids:
+#                     related_sections.append(sec)
+#                     seen_ids.add(sec_id)
+
+#     return related_sections
+
 def expand_with_related_sections(top_matches: list, chapter_grouped: dict, neighbors: int = 10):
-    """
-    Expand legal context by:
-    1. Fetching all sections from top N chapters
-    2. If no chapter, fallback to ±neighbors using section index
-    """
     related_sections = []
     seen_ids = set()
+    MAX_PER_CHAPTER = 10
 
-    # 1. Collect top 3 unique chapter titles
+    # 1. Top chapters
     top_chapters = []
     for match in top_matches:
         chap = match["payload"].get("chapterTitle", "").strip()
@@ -221,28 +260,32 @@ def expand_with_related_sections(top_matches: list, chapter_grouped: dict, neigh
         if len(top_chapters) >= 3:
             break
 
-    # 2. Get all sections from those chapters
     for chap in top_chapters:
+        count = 0
         for sec in chapter_grouped.get(chap, []):
             sec_id = sec['sectionUrl']
             if sec_id not in seen_ids:
                 related_sections.append(sec)
                 seen_ids.add(sec_id)
+                count += 1
+            if count >= MAX_PER_CHAPTER:
+                break
 
-    # 3. If no chapter or section is flat, fallback to ±10
-    all_flat = list(sum(chapter_grouped.values(), []))  # flatten all
-    url_to_index = {s['sectionUrl']: idx for idx, s in enumerate(all_flat)}
+    # 2. Optional fallback: ±neighbors from top 3
+    if len(related_sections) < 30:
+        all_flat = list(sum(chapter_grouped.values(), []))  # flatten
+        url_to_index = {s['sectionUrl']: idx for idx, s in enumerate(all_flat)}
 
-    for match in top_matches[:3]:
-        sec_id = match["payload"]["sectionUrl"]
-        idx = url_to_index.get(sec_id, None)
-        if idx is not None:
-            for i in range(max(0, idx - neighbors), min(len(all_flat), idx + neighbors + 1)):
-                sec = all_flat[i]
-                sec_id = sec['sectionUrl']
-                if sec_id not in seen_ids:
-                    related_sections.append(sec)
-                    seen_ids.add(sec_id)
+        for match in top_matches[:3]:
+            sec_id = match["payload"]["sectionUrl"]
+            idx = url_to_index.get(sec_id)
+            if idx is not None:
+                for i in range(max(0, idx - neighbors), min(len(all_flat), idx + neighbors + 1)):
+                    sec = all_flat[i]
+                    sec_id = sec['sectionUrl']
+                    if sec_id not in seen_ids:
+                        related_sections.append(sec)
+                        seen_ids.add(sec_id)
 
     return related_sections
 
