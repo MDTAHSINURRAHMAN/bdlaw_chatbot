@@ -19,53 +19,58 @@ COLLECTION_NAME = "bdlaws"
 # ✅ Qdrant connection
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
-
-def call_gemini_final_summary(query: str, chunk_responses: list) -> dict:
+def call_openrouter_final_summary(query: str, chunk_responses: list) -> dict:
     prompt = f"""
     You are a legal assistant. A user asked the following question:
 
     "{query}"
 
-    You were given multiple JSON responses from analyzing relevant legal sections in chunks. Each JSON includes:
+    You were given multiple JSON responses from analyzing relevant legal sections. Each JSON includes:
     - a `summary` of that chunk,
-    - a list of `top_sections` with reasons,
+    - a list of `top_sections`,
     - and a `legal_insight`.
 
-    Your job is to synthesize all this information and return a final analysis as a JSON.
-
-    Output format:
+    Return final JSON in this format:
     {{
     "final_summary": "...",
     "relevant_sections": [
-        {{ "title": "...", "reason": "..." }},
-        ...
+        {{ "title": "...", "reason": "..." }}
     ],
     "final_legal_insight": "..."
     }}
 
     Here are the JSONs:
     {json.dumps(chunk_responses, indent=2)}
-    """.strip()
+    """
 
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+
     data = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2}
+        "model": "google/gemini-2.5-flash",
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}]
+            }
+        ]
     }
 
     response = requests.post(
-        os.getenv("GEMINI_API_URL"),
+        os.getenv("OPENROUTER_API_URL"),
         headers=headers,
-        params={"key": os.getenv("GEMINI_API_KEY")},
         json=data
     )
 
     if response.status_code != 200:
-        raise Exception(f"Gemini request failed: {response.status_code} - {response.text}")
+        raise Exception(f"OpenRouter failed: {response.status_code} - {response.text}")
 
-    gemini_text = response.json()['candidates'][0]['content']['parts'][0]['text']
-    cleaned = clean_gemini_json(gemini_text)
-    return json.loads(cleaned)
+    reply = response.json()['choices'][0]['message']['content']
+    fixed = clean_gemini_json(reply)
+    return json.loads(fixed)
+
 
 
 
@@ -82,62 +87,59 @@ def clean_gemini_json(text: str) -> str:
     return re.sub(r'"([^"]*?)"', sanitize_string_literals, text)
 
 
-def call_gemini_chunk_analysis(query: str, sections: list) -> dict:
-    combined_text = "\n\n".join([
-        f"{sec['actTitle']} > {sec['sectionTitle']}\n{sec['text']}"
-        for sec in sections
-    ])
+def call_openrouter_chunk_analysis(query: str, sections: list) -> dict:
+    law_text = "\n\n".join(
+    f"{sec['actTitle']} > {sec['sectionTitle']}\n{sec['text']}" for sec in sections
+    )
 
     prompt = f"""
     A user asked: "{query}"
 
     You are a legal assistant. Analyze the following legal sections. Return a JSON with:
     {{
-      "summary": "...",
-      "top_sections": [
+    "summary": "...",
+    "top_sections": [
         {{ "title": "Act > Section", "reason": "..." }},
         ...
-      ],
-      "legal_insight": "..."
+    ],
+    "legal_insight": "..."
     }}
 
     Laws:
-    {combined_text}
+    {law_text}
     """
 
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+
     data = {
-        "contents": [{"parts": [{"text": prompt.strip()}]}],
-        "generationConfig": {"temperature": 0.2}
+        "model": "google/gemini-2.5-flash",  # use your preferred model
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}]
+            }
+        ]
     }
 
     response = requests.post(
-        os.getenv("GEMINI_API_URL"),
+        os.getenv("OPENROUTER_API_URL"),
         headers=headers,
-        params={"key": os.getenv("GEMINI_API_KEY")},
         json=data
     )
 
     if response.status_code != 200:
-        raise Exception(f"Gemini request failed: {response.status_code} - {response.text}")
+        raise Exception(f"OpenRouter failed: {response.status_code} - {response.text}")
 
+    reply = response.json()['choices'][0]['message']['content']
     try:
-        gemini_text = response.json()['candidates'][0]['content']['parts'][0]['text']
-    except Exception as e:
-        raise Exception(f"Gemini API structure changed or response missing: {e}\nRaw:\n{response.text}")
-
-    if not gemini_text.strip():
-        raise Exception(f"Gemini returned empty response!\nRaw:\n{response.text}")
-
-    try:
-        return json.loads(gemini_text.strip())
+        return json.loads(reply.strip())
     except json.JSONDecodeError:
-        # Try to clean the text using custom fixer
-        fixed = clean_gemini_json(gemini_text)
-        try:
-            return json.loads(fixed)
-        except json.JSONDecodeError as e:
-            raise Exception(f"Gemini JSON parsing failed after cleaning: {e}\nFixed text:\n{fixed}")
+        fixed = clean_gemini_json(reply)  # Reuse your fixer
+        return json.loads(fixed)
+
 
 
 
@@ -198,46 +200,45 @@ def expand_with_related_sections(top_matches: list, chapter_grouped: dict, neigh
     return related_sections
 
 
-def get_relevance_score_gemini(query: str, section_text: str) -> dict:
-
-    GEMINI_API_URL = os.getenv("GEMINI_API_URL")
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-    headers = {
-        "Content-Type": "application/json",
-        "X-goog-api-key": GEMINI_API_KEY
-    }
-
+def get_relevance_score_openrouter(query: str, section_text: str) -> dict:
     prompt = f"""
     You are a legal assistant AI. A user asked: "{query}"
 
-    Now read the following law section and rate how relevant it is on a scale from 0 to 10.
-    Give a JSON response like this:
-    {{"score": number, "reason": "..."}}
+    Read this law section and rate relevance from 0 to 10.
+    Return JSON: {{ "score": number, "reason": "..." }}
 
     LAW SECTION:
     {section_text}
-        """
+    """
 
-    data = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.3}
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Content-Type": "application/json"
     }
 
-    response = requests.post(GEMINI_API_URL, headers=headers, json=data)
+    data = {
+        "model": "google/gemini-2.5-flash",
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}]
+            }
+        ]
+    }
 
-    if response.status_code == 200:
-        try:
-            text_response = response.json()['candidates'][0]['content']['parts'][0]['text']
+    response = requests.post(
+        os.getenv("OPENROUTER_API_URL"),
+        headers=headers,
+        json=data
+    )
 
-            # ✅ Clean up code blocks if present
-            cleaned = re.sub(r"```json|```", "", text_response.strip(), flags=re.MULTILINE)
+    if response.status_code != 200:
+        raise Exception(f"OpenRouter failed: {response.status_code} - {response.text}")
 
-            return json.loads(cleaned.strip())
-        except Exception as e:
-            raise Exception(f"Failed to parse Gemini response: {e}\nRaw response:\n{text_response}")
-    else:
-        raise Exception(f"Gemini request failed: {response.status_code} - {response.text}")
+    reply = response.json()['choices'][0]['message']['content']
+    fixed = clean_gemini_json(reply)
+    return json.loads(fixed)
+
 
 
 
@@ -269,7 +270,7 @@ def semantic_search(query: str, top_k: int = 10):
     scored_results = []
     for hit in raw_results:
         section_text = hit.payload['text']
-        score_data = get_relevance_score_gemini(query, section_text)
+        score_data = get_relevance_score_openrouter(query, section_text)
         scored_results.append({
             "score": score_data['score'],
             "reason": score_data['reason'],
@@ -300,7 +301,7 @@ if __name__ == "__main__":
 
     for i, chunk in enumerate(chunks):
         print(f"\n🔹 Analyzing chunk {i+1}/{len(chunks)}...")
-        result = call_gemini_chunk_analysis(q, chunk)
+        result = call_openrouter_chunk_analysis(q, chunk)
         all_insights.append(result)
 
     # Optional: Print all responses
@@ -310,7 +311,7 @@ if __name__ == "__main__":
     
     # ✅ FINAL SYNTHESIS STEP — combine all chunks into one final answer
     print("\n📦 Compiling final answer from Gemini...")
-    final_analysis = call_gemini_final_summary(q, all_insights)
+    final_analysis = call_openrouter_final_summary(q, all_insights)
 
     print("\n🧠 Final Gemini Response:")
     print(json.dumps(final_analysis, indent=2, ensure_ascii=False))
