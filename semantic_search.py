@@ -20,6 +20,55 @@ COLLECTION_NAME = "bdlaws"
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
 
+def call_gemini_final_summary(query: str, chunk_responses: list) -> dict:
+    prompt = f"""
+    You are a legal assistant. A user asked the following question:
+
+    "{query}"
+
+    You were given multiple JSON responses from analyzing relevant legal sections in chunks. Each JSON includes:
+    - a `summary` of that chunk,
+    - a list of `top_sections` with reasons,
+    - and a `legal_insight`.
+
+    Your job is to synthesize all this information and return a final analysis as a JSON.
+
+    Output format:
+    {{
+    "final_summary": "...",
+    "relevant_sections": [
+        {{ "title": "...", "reason": "..." }},
+        ...
+    ],
+    "final_legal_insight": "..."
+    }}
+
+    Here are the JSONs:
+    {json.dumps(chunk_responses, indent=2)}
+    """.strip()
+
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2}
+    }
+
+    response = requests.post(
+        os.getenv("GEMINI_API_URL"),
+        headers=headers,
+        params={"key": os.getenv("GEMINI_API_KEY")},
+        json=data
+    )
+
+    if response.status_code != 200:
+        raise Exception(f"Gemini request failed: {response.status_code} - {response.text}")
+
+    gemini_text = response.json()['candidates'][0]['content']['parts'][0]['text']
+    cleaned = clean_gemini_json(gemini_text)
+    return json.loads(cleaned)
+
+
+
 def clean_gemini_json(text: str) -> str:
     # Remove Markdown code block wrappers
     if text.startswith("```json"):
@@ -258,3 +307,10 @@ if __name__ == "__main__":
     for i, insight in enumerate(all_insights):
         print(f"\n🔍 Gemini Analysis (Chunk {i+1}):")
         print(json.dumps(insight, indent=2, ensure_ascii=False))
+    
+    # ✅ FINAL SYNTHESIS STEP — combine all chunks into one final answer
+    print("\n📦 Compiling final answer from Gemini...")
+    final_analysis = call_gemini_final_summary(q, all_insights)
+
+    print("\n🧠 Final Gemini Response:")
+    print(json.dumps(final_analysis, indent=2, ensure_ascii=False))
