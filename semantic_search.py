@@ -23,26 +23,45 @@ def enrich_relevant_sections(relevant_sections: list, all_sections: list) -> lis
     enriched = []
 
     for entry in relevant_sections:
-        title = entry["title"].strip()
+        raw_title = entry["title"].strip()
 
-        # Match actTitle + sectionTitle
+        # ✅ Extract section number using regex (e.g., (Section 459))
+        match = re.search(r"\(Section\s+(\d+[A-Za-z]*)\)", raw_title)
+        section_number = match.group(1) if match else None
+
+        # ✅ Remove (Section XXX) from title
+        cleaned_title = re.sub(r"\s*\(Section\s+\d+[A-Za-z]*\)", "", raw_title).strip()
+
+        # ✅ Split to get actTitle and sectionTitle
+        if ">" in cleaned_title:
+            act_title, section_title = map(str.strip, cleaned_title.split(">", 1))
+        else:
+            act_title = ""
+            section_title = cleaned_title
+
+        # ✅ Try to match based on sectionTitle and section number
+        matched = None
         for sec in all_sections:
-            full_title = f"{sec['actTitle'].strip()} > {sec['sectionTitle'].strip()}"
-            if full_title == title:
-                enriched.append({
-                    **entry,  # includes title, reason
-                    "actTitle": sec.get("actTitle"),
-                    "sectionTitle": sec.get("sectionTitle"),
-                    "chapterTitle": sec.get("chapterTitle"),
-                    "sectionUrl": sec.get("sectionUrl"),
-                    "actUrl": sec.get("actUrl"),
-                    "text": sec.get("text"),
-                    "actRepealed": sec.get("actRepealed"),
-                    "actPreamble": sec.get("actPreamble"),
-                    "actDate": sec.get("actDate"),
-                    "actSubtitle": sec.get("actSubtitle")
-                })
+            if sec['actTitle'].strip() == act_title and sec['sectionTitle'].strip() == section_title:
+                matched = sec
                 break
+
+        if matched:
+            enriched.append({
+                "title": raw_title,
+                "reason": entry.get("reason"),
+                "section": section_number,  # ✅ new field
+                "actTitle": matched.get("actTitle"),
+                "sectionTitle": matched.get("sectionTitle"),
+                "chapterTitle": matched.get("chapterTitle"),
+                "sectionUrl": matched.get("sectionUrl"),
+                "actUrl": matched.get("actUrl"),
+                "text": matched.get("text"),
+                "actRepealed": matched.get("actRepealed"),
+                "actPreamble": matched.get("actPreamble"),
+                "actDate": matched.get("actDate"),
+                "actSubtitle": matched.get("actSubtitle")
+            })
 
     return enriched
 
@@ -368,3 +387,16 @@ if __name__ == "__main__":
         print(f"📆 Act Date: {sec.get('actDate')}")
         print(f"📝 Subtitle: {sec.get('actSubtitle')}")
         print(f"🚫 Repealed: {sec.get('actRepealed')}")
+    
+    # ✅ Create a final JSON object
+    final_json_output = {
+        "final_summary": final_analysis["final_summary"],
+        "final_legal_insight": final_analysis["final_legal_insight"],
+        "relevant_sections_full": enriched_sections
+    }
+
+    # ✅ Save to file or print
+    with open("final_legal_response.json", "w", encoding="utf-8") as f:
+        json.dump(final_json_output, f, indent=2, ensure_ascii=False)
+
+    print("\n✅ Final legal response JSON saved as 'final_legal_response.json'")
