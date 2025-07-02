@@ -1,4 +1,7 @@
 import os
+import json
+import ast
+import re
 import requests
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
@@ -16,12 +19,64 @@ COLLECTION_NAME = "bdlaws"
 # ✅ Qdrant connection
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
+def get_all_sections_grouped_by_chapter_from_file(filepath="bdlaws_merged.json"):
+    with open(filepath, "r", encoding="utf-8") as f:
+        all_sections = json.load(f)
+
+    grouped = {}
+    for sec in all_sections:
+        chapter = sec.get("chapterTitle", "").strip()
+        grouped.setdefault(chapter, []).append(sec)
+
+    return grouped
+
+
+
+def expand_with_related_sections(top_matches: list, chapter_grouped: dict, neighbors: int = 10):
+    """
+    Expand legal context by:
+    1. Fetching all sections from top N chapters
+    2. If no chapter, fallback to ±neighbors using section index
+    """
+    related_sections = []
+    seen_ids = set()
+
+    # 1. Collect top 3 unique chapter titles
+    top_chapters = []
+    for match in top_matches:
+        chap = match["payload"].get("chapterTitle", "").strip()
+        if chap and chap not in top_chapters:
+            top_chapters.append(chap)
+        if len(top_chapters) >= 3:
+            break
+
+    # 2. Get all sections from those chapters
+    for chap in top_chapters:
+        for sec in chapter_grouped.get(chap, []):
+            sec_id = sec['sectionUrl']
+            if sec_id not in seen_ids:
+                related_sections.append(sec)
+                seen_ids.add(sec_id)
+
+    # 3. If no chapter or section is flat, fallback to ±10
+    all_flat = list(sum(chapter_grouped.values(), []))  # flatten all
+    url_to_index = {s['sectionUrl']: idx for idx, s in enumerate(all_flat)}
+
+    for match in top_matches[:3]:
+        sec_id = match["payload"]["sectionUrl"]
+        idx = url_to_index.get(sec_id, None)
+        if idx is not None:
+            for i in range(max(0, idx - neighbors), min(len(all_flat), idx + neighbors + 1)):
+                sec = all_flat[i]
+                sec_id = sec['sectionUrl']
+                if sec_id not in seen_ids:
+                    related_sections.append(sec)
+                    seen_ids.add(sec_id)
+
+    return related_sections
+
+
 def get_relevance_score_gemini(query: str, section_text: str) -> dict:
-    """
-    Sends the query and section text to Gemini API (API key-based) to get a relevance score and reason.
-    Returns: {"score": float, "reason": str}
-    """
-    import json
 
     GEMINI_API_URL = os.getenv("GEMINI_API_URL")
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -36,7 +91,7 @@ def get_relevance_score_gemini(query: str, section_text: str) -> dict:
 
     Now read the following law section and rate how relevant it is on a scale from 0 to 10.
     Give a JSON response like this:
-    {{"score": number, "reason": "..." }}
+    {{"score": number, "reason": "..."}}
 
     LAW SECTION:
     {section_text}
@@ -51,17 +106,12 @@ def get_relevance_score_gemini(query: str, section_text: str) -> dict:
 
     if response.status_code == 200:
         try:
-            import re
             text_response = response.json()['candidates'][0]['content']['parts'][0]['text']
 
-            # Use regex to extract the first JSON-like object
-            match = re.search(r'\{.*?\}', text_response.strip(), re.DOTALL)
-            if match:
-                json_text = match.group(0)
-                parsed = json.loads(json_text)
-                return parsed
-            else:
-                raise Exception(f"Could not extract JSON from Gemini response:\n{text_response}")
+            # ✅ Clean up code blocks if present
+            cleaned = re.sub(r"```json|```", "", text_response.strip(), flags=re.MULTILINE)
+
+            return json.loads(cleaned.strip())
         except Exception as e:
             raise Exception(f"Failed to parse Gemini response: {e}\nRaw response:\n{text_response}")
     else:
@@ -113,10 +163,10 @@ def semantic_search(query: str, top_k: int = 10):
 # ✅ CLI test
 if __name__ == "__main__":
     q = input("Ask your legal question: ")
-    matches = semantic_search(q)
+    top_matches = semantic_search(q)
+    chapter_grouped = get_all_sections_grouped_by_chapter_from_file()
+    expanded_sections = expand_with_related_sections(top_matches, chapter_grouped)
 
-    for i, match in enumerate(matches, 1):
-        payload = match["payload"]
-        print(f"\n#{i} - {payload['actTitle']} > {payload['sectionTitle']}")
-        print(f"Score: {match['score']} | Reason: {match['reason']}")
-        print(f"{payload['text'][:300]}...")
+    print(f"\n🔍 Expanded Contextual Sections (Total: {len(expanded_sections)}):")
+    for i, sec in enumerate(expanded_sections, 1):
+        print(f"\n#{i} - {sec['actTitle']} > {sec['sectionTitle']}\n{sec['text'][:500]}...\n")
