@@ -19,6 +19,79 @@ COLLECTION_NAME = "bdlaws"
 # ✅ Qdrant connection
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
+
+def clean_gemini_json(text: str) -> str:
+    # Remove Markdown code block wrappers
+    if text.startswith("```json"):
+        text = text.strip().removeprefix("```json").removesuffix("```").strip()
+
+    # Replace control characters inside string values
+    def sanitize_string_literals(m):
+        return '"' + m.group(1).replace('\n', '\\n').replace('\r', '').replace('\t', '\\t').replace('"', '\\"') + '"'
+
+    # Replace double quotes and linebreaks inside string values
+    return re.sub(r'"([^"]*?)"', sanitize_string_literals, text)
+
+
+def call_gemini_chunk_analysis(query: str, sections: list) -> dict:
+    combined_text = "\n\n".join([
+        f"{sec['actTitle']} > {sec['sectionTitle']}\n{sec['text']}"
+        for sec in sections
+    ])
+
+    prompt = f"""
+    A user asked: "{query}"
+
+    You are a legal assistant. Analyze the following legal sections. Return a JSON with:
+    {{
+      "summary": "...",
+      "top_sections": [
+        {{ "title": "Act > Section", "reason": "..." }},
+        ...
+      ],
+      "legal_insight": "..."
+    }}
+
+    Laws:
+    {combined_text}
+    """
+
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "contents": [{"parts": [{"text": prompt.strip()}]}],
+        "generationConfig": {"temperature": 0.2}
+    }
+
+    response = requests.post(
+        os.getenv("GEMINI_API_URL"),
+        headers=headers,
+        params={"key": os.getenv("GEMINI_API_KEY")},
+        json=data
+    )
+
+    if response.status_code != 200:
+        raise Exception(f"Gemini request failed: {response.status_code} - {response.text}")
+
+    try:
+        gemini_text = response.json()['candidates'][0]['content']['parts'][0]['text']
+    except Exception as e:
+        raise Exception(f"Gemini API structure changed or response missing: {e}\nRaw:\n{response.text}")
+
+    if not gemini_text.strip():
+        raise Exception(f"Gemini returned empty response!\nRaw:\n{response.text}")
+
+    try:
+        return json.loads(gemini_text.strip())
+    except json.JSONDecodeError:
+        # Try to clean the text using custom fixer
+        fixed = clean_gemini_json(gemini_text)
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError as e:
+            raise Exception(f"Gemini JSON parsing failed after cleaning: {e}\nFixed text:\n{fixed}")
+
+
+
 def get_all_sections_grouped_by_chapter_from_file(filepath="bdlaws_merged.json"):
     with open(filepath, "r", encoding="utf-8") as f:
         all_sections = json.load(f)
@@ -170,3 +243,18 @@ if __name__ == "__main__":
     print(f"\n🔍 Expanded Contextual Sections (Total: {len(expanded_sections)}):")
     for i, sec in enumerate(expanded_sections, 1):
         print(f"\n#{i} - {sec['actTitle']} > {sec['sectionTitle']}\n{sec['text'][:500]}...\n")
+    print("\n⏳ Sending sections to Gemini for analysis...")
+
+    # Split sections into batches of 10 (tune this if needed)
+    chunks = [expanded_sections[i:i + 10] for i in range(0, len(expanded_sections), 10)]
+    all_insights = []
+
+    for i, chunk in enumerate(chunks):
+        print(f"\n🔹 Analyzing chunk {i+1}/{len(chunks)}...")
+        result = call_gemini_chunk_analysis(q, chunk)
+        all_insights.append(result)
+
+    # Optional: Print all responses
+    for i, insight in enumerate(all_insights):
+        print(f"\n🔍 Gemini Analysis (Chunk {i+1}):")
+        print(json.dumps(insight, indent=2, ensure_ascii=False))
