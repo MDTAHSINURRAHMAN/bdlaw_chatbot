@@ -20,7 +20,6 @@ filelock==3.18.0
 frozenlist==1.7.0
 fsspec==2025.5.1
 googleapis-common-protos==1.70.0
-googletrans==4.0.0rc1
 grpcio==1.68.0
 grpcio-health-checking==1.68.0
 grpcio-reflection==1.68.0
