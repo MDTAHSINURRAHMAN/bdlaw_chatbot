@@ -1,72 +1,46 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-# Import CORSMiddleware for CORS support
-from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Dict
-import json
-import traceback
 from core import (
     semantic_search,
+    get_all_sections_grouped_by_chapter_from_qdrant,
     expand_with_related_sections,
     call_openrouter_chunk_analysis,
     call_openrouter_final_summary,
-    enrich_relevant_sections
+    fetch_sections_from_qdrant_by_title
 )
-
 
 app = FastAPI()
 
-# ✅ Allow frontend to talk to backend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Or ["*"] to allow all origins (for development only)
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+# ✅ Define request model for query input
 class QueryRequest(BaseModel):
     query: str
-    
-@app.get("/")
-async def root():
-    return {"message": "BDLaw Chatbot API is live!"}
 
+@app.get("/")
+def root():
+    return {"status": "✅ Legal Assistant API is live!"}
+
+# ✅ POST endpoint with request model
 @app.post("/legal-analyze")
 async def analyze_legal_query(payload: QueryRequest):
-    try:
-        q = payload.query.strip()
+    query = payload.query
 
-        # Step 1: Semantic Search
-        top_matches = semantic_search(q)
+    # Step 1: Semantic search
+    top_matches = semantic_search(query)
 
-        # Step 2: Load all grouped sections
-        expanded_sections = expand_with_related_sections(top_matches)
+    # Step 2: Expand sections
+    chapter_grouped = get_all_sections_grouped_by_chapter_from_qdrant()
+    expanded_sections = expand_with_related_sections(top_matches, chapter_grouped)
 
-        # Step 4: Gemini analysis in chunks
-        chunks = [expanded_sections[i:i + 10] for i in range(0, len(expanded_sections), 10)]
-        all_insights = []
-        for chunk in chunks:
-            result = call_openrouter_chunk_analysis(q, chunk)
-            all_insights.append(result)
+    # Step 3: Analyze chunks
+    chunks = [expanded_sections[i:i + 10] for i in range(0, len(expanded_sections), 10)]
+    all_insights = [call_openrouter_chunk_analysis(query, chunk) for chunk in chunks]
 
-        # Step 5: Final synthesis
-        final_analysis = call_openrouter_final_summary(q, all_insights)
+    # Step 4: Final Gemini summary
+    final_analysis = call_openrouter_final_summary(query, all_insights)
 
-        # Step 6: Enrich final top sections
-        enriched_sections = enrich_relevant_sections(
-        final_analysis["relevant_sections"],
-        expanded_sections
-        )
-        enriched_sections = enrich_relevant_sections(final_analysis["relevant_sections"], enriched_sections)
+    # Step 5: Get enriched metadata from Qdrant
+    enriched_sections = fetch_sections_from_qdrant_by_title(final_analysis["relevant_sections"])
+    final_analysis["relevant_sections_full"] = enriched_sections
 
-        # Step 7: Return final structured JSON
-        return {
-            "final_summary": final_analysis["final_summary"],
-            "final_legal_insight": final_analysis["final_legal_insight"],
-            "relevant_sections_full": enriched_sections
-        }
-
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    return JSONResponse(final_analysis)

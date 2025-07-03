@@ -6,7 +6,7 @@ import requests
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue, SearchRequest
-# from jina import __version__ as jina_version
+from jina import __version__ as jina_version
 
 # ✅ Load environment variables
 load_dotenv()
@@ -20,30 +20,69 @@ COLLECTION_NAME = "bdlaws"
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
 
+def fetch_sections_from_qdrant_by_title(gemini_titles: list, top_k=1):
+    enriched = []
+
+    for entry in gemini_titles:
+        title_query = entry['title']
+
+        # 🔍 Vector search with title as query
+        try:
+            title_vector = embed_query(title_query)
+            results = client.search(
+                collection_name=COLLECTION_NAME,
+                query_vector=title_vector,
+                limit=top_k
+            )
+        except Exception as e:
+            print(f"❌ Qdrant search failed for: {title_query}\n{e}")
+            continue
+
+        if results:
+            best_match = results[0]
+            enriched.append({
+                "title": entry["title"],
+                "reason": entry["reason"],
+                "section": re.search(r"\((\d+[A-Za-z]*)\)", entry["title"]).group(1) if re.search(r"\((\d+[A-Za-z]*)\)", entry["title"]) else None,
+                **best_match.payload  # include all metadata fields like actTitle, text, etc.
+            })
+        else:
+            print(f"⚠️ No match found in Qdrant for: {title_query}")
+
+    return enriched
+
 def enrich_relevant_sections(relevant_sections: list, all_sections: list) -> list:
     enriched = []
 
     for entry in relevant_sections:
         raw_title = entry["title"].strip()
 
-        # ✅ Extract section number using regex (e.g., (Section 459))
+        # ✅ Extract section number (optional, may not exist)
         match = re.search(r"\(Section\s+(\d+[A-Za-z]*)\)", raw_title)
         section_number = match.group(1) if match else None
 
-        # ✅ Remove (Section XXX) from title
+        # ✅ Clean trailing section numbers or newline digits
         cleaned_title = re.sub(r"\s*\(Section\s+\d+[A-Za-z]*\)", "", raw_title).strip()
+        cleaned_title = re.sub(r"\n\d+\.*$", "", cleaned_title).strip()
 
-        # ✅ Split to get actTitle and sectionTitle
+        # ✅ Split act and section titles
         if ">" in cleaned_title:
             act_title, section_title = map(str.strip, cleaned_title.split(">", 1))
         else:
             act_title = ""
             section_title = cleaned_title
 
-        # ✅ Try to match based on sectionTitle and section number
         matched = None
+
         for sec in all_sections:
-            if sec['actTitle'].strip() == act_title and sec['sectionTitle'].strip() == section_title:
+            sec_act = sec['actTitle'].strip()
+            sec_title = sec['sectionTitle'].strip()
+
+            # Match more flexibly:
+            if (
+                sec_act.endswith(act_title) and
+                section_title.lower() in sec_title.lower()
+            ):
                 matched = sec
                 break
 
@@ -51,7 +90,7 @@ def enrich_relevant_sections(relevant_sections: list, all_sections: list) -> lis
             enriched.append({
                 "title": raw_title,
                 "reason": entry.get("reason"),
-                "section": section_number,  # ✅ new field
+                "section": section_number,
                 "actTitle": matched.get("actTitle"),
                 "sectionTitle": matched.get("sectionTitle"),
                 "chapterTitle": matched.get("chapterTitle"),
@@ -63,6 +102,8 @@ def enrich_relevant_sections(relevant_sections: list, all_sections: list) -> lis
                 "actDate": matched.get("actDate"),
                 "actSubtitle": matched.get("actSubtitle")
             })
+        else:
+            print(f"⚠️ Could not match: {raw_title}")
 
     return enriched
 
@@ -114,10 +155,6 @@ def call_openrouter_final_summary(query: str, chunk_responses: list) -> dict:
 
     if response.status_code != 200:
         raise Exception(f"OpenRouter failed: {response.status_code} - {response.text}")
-    
-    # ✅ NEW: Check if response is empty
-    if not response.text.strip():
-        raise Exception("OpenRouter returned an empty response.")
 
     reply = response.json()['choices'][0]['message']['content']
     fixed = clean_gemini_json(reply)
@@ -195,23 +232,16 @@ def call_openrouter_chunk_analysis(query: str, sections: list) -> dict:
 
 
 
-# def get_all_sections_grouped_by_chapter_from_file(filepath=None):
-#     if filepath is None:
-#         # 👇 Make sure this matches the location in the Render container
-#         filepath = os.path.join(os.path.dirname(__file__), "bdlaws_merged.json")
+def get_all_sections_grouped_by_chapter_from_qdrant(limit=10_000):
+    print("📡 Fetching all legal sections from Qdrant...")
+    all_sections, _ = client.scroll(collection_name=COLLECTION_NAME, limit=limit)
 
-#     if not os.path.exists(filepath):
-#         raise FileNotFoundError(f"JSON file missing at: {filepath}")
-
-#     with open(filepath, "r", encoding="utf-8") as f:
-#         all_sections = json.load(f)
-
-#     grouped = {}
-#     for sec in all_sections:
-#         chapter = sec.get("chapterTitle", "").strip()
-#         grouped.setdefault(chapter, []).append(sec)
-
-#     return grouped
+    grouped = {}
+    for sec in all_sections:
+        chapter = sec.payload.get("chapterTitle", "").strip()
+        grouped.setdefault(chapter, []).append(sec.payload)
+    
+    return grouped
 
 
 
@@ -258,21 +288,12 @@ def call_openrouter_chunk_analysis(query: str, sections: list) -> dict:
 
 #     return related_sections
 
-def get_sections_by_chapter(chapter_title: str, limit: int = 10):
-    return client.scroll(
-        collection_name=COLLECTION_NAME,
-        scroll_filter=Filter(
-            must=[FieldCondition(key="chapterTitle", match=MatchValue(value=chapter_title))]
-        ),
-        limit=limit
-    )[0]
-
-
-def expand_with_related_sections(top_matches: list, neighbors: int = 10):
+def expand_with_related_sections(top_matches: list, chapter_grouped: dict, neighbors: int = 10):
     related_sections = []
     seen_ids = set()
     MAX_PER_CHAPTER = 10
 
+    # 1. Top chapters
     top_chapters = []
     for match in top_matches:
         chap = match["payload"].get("chapterTitle", "").strip()
@@ -282,15 +303,33 @@ def expand_with_related_sections(top_matches: list, neighbors: int = 10):
             break
 
     for chap in top_chapters:
-        chapter_sections = get_sections_by_chapter(chap, MAX_PER_CHAPTER)
-        for sec in chapter_sections:
-            sec_id = sec.payload['sectionUrl']
+        count = 0
+        for sec in chapter_grouped.get(chap, []):
+            sec_id = sec['sectionUrl']
             if sec_id not in seen_ids:
-                related_sections.append(sec.payload)
+                related_sections.append(sec)
                 seen_ids.add(sec_id)
+                count += 1
+            if count >= MAX_PER_CHAPTER:
+                break
+
+    # 2. Optional fallback: ±neighbors from top 3
+    if len(related_sections) < 30:
+        all_flat = list(sum(chapter_grouped.values(), []))  # flatten
+        url_to_index = {s['sectionUrl']: idx for idx, s in enumerate(all_flat)}
+
+        for match in top_matches[:3]:
+            sec_id = match["payload"]["sectionUrl"]
+            idx = url_to_index.get(sec_id)
+            if idx is not None:
+                for i in range(max(0, idx - neighbors), min(len(all_flat), idx + neighbors + 1)):
+                    sec = all_flat[i]
+                    sec_id = sec['sectionUrl']
+                    if sec_id not in seen_ids:
+                        related_sections.append(sec)
+                        seen_ids.add(sec_id)
 
     return related_sections
-
 
 
 def get_relevance_score_openrouter(query: str, section_text: str) -> dict:
@@ -364,11 +403,13 @@ def semantic_search(query: str, top_k: int = 10):
     for hit in raw_results:
         section_text = hit.payload['text']
         score_data = get_relevance_score_openrouter(query, section_text)
-        scored_results.append({
+        scored_result = {
             "score": score_data['score'],
             "reason": score_data['reason'],
-            "payload": hit.payload
-        })
+            "payload": hit.payload  # full section
+        }
+        scored_results.append(scored_result)
+        
 
     # Sort by Gemini AI relevance score
     sorted_results = sorted(scored_results, key=lambda x: x["score"], reverse=True)
