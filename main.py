@@ -70,4 +70,4 @@ async def analyze_legal_query(payload: QueryRequest):
 
     except Exception as e:
         traceback.print_exc()
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
