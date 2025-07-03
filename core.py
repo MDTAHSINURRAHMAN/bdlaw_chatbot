@@ -19,6 +19,18 @@ COLLECTION_NAME = "bdlaws"
 # ✅ Qdrant connection
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
+
+def download_if_missing(filename: str, url: str):
+    if not os.path.exists(filename):
+        print(f"📥 Downloading {filename} from {url} ...")
+        response = requests.get(url)
+        if response.status_code == 200:
+            with open(filename, "wb") as f:
+                f.write(response.content)
+            print(f"✅ Downloaded {filename}")
+        else:
+            raise Exception(f"Failed to download {filename}: {response.status_code}")
+
 def enrich_relevant_sections(relevant_sections: list, all_sections: list) -> list:
     enriched = []
 
@@ -191,6 +203,13 @@ def call_openrouter_chunk_analysis(query: str, sections: list) -> dict:
 
 
 def get_all_sections_grouped_by_chapter_from_file(filepath="bdlaws_merged.json"):
+    
+    # ✅ Auto-download if file is missing
+    download_if_missing(
+        filepath,
+        "https://drive.google.com/uc?export=download&id=1mQqPF5ed9e_Pl--2LWNdEZEjD0rgumVC"
+    )
+    
     with open(filepath, "r", encoding="utf-8") as f:
         all_sections = json.load(f)
 
