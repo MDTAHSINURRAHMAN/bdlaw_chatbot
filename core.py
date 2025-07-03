@@ -195,8 +195,14 @@ def call_openrouter_chunk_analysis(query: str, sections: list) -> dict:
 
 
 
-def get_all_sections_grouped_by_chapter_from_file(filepath="bdlaws_merged.json"):
-    
+def get_all_sections_grouped_by_chapter_from_file(filepath=None):
+    if filepath is None:
+        # 👇 Make sure this matches the location in the Render container
+        filepath = os.path.join(os.path.dirname(__file__), "bdlaws_merged.json")
+
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"JSON file missing at: {filepath}")
+
     with open(filepath, "r", encoding="utf-8") as f:
         all_sections = json.load(f)
 
