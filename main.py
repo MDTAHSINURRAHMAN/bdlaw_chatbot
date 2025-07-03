@@ -27,6 +27,10 @@ app.add_middleware(
 
 class QueryRequest(BaseModel):
     query: str
+    
+@app.get("/")
+async def root():
+    return {"message": "BDLaw Chatbot API is live!"}
 
 @app.post("/legal-analyze")
 async def analyze_legal_query(payload: QueryRequest):
