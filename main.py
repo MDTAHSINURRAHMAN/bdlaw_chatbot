@@ -7,7 +7,6 @@ import json
 import traceback
 from core import (
     semantic_search,
-    get_all_sections_grouped_by_chapter_from_file,
     expand_with_related_sections,
     call_openrouter_chunk_analysis,
     call_openrouter_final_summary,
@@ -42,10 +41,7 @@ async def analyze_legal_query(payload: QueryRequest):
         top_matches = semantic_search(q)
 
         # Step 2: Load all grouped sections
-        chapter_grouped = get_all_sections_grouped_by_chapter_from_file()
-
-        # Step 3: Expand context
-        expanded_sections = expand_with_related_sections(top_matches, chapter_grouped)
+        expanded_sections = expand_with_related_sections(top_matches)
 
         # Step 4: Gemini analysis in chunks
         chunks = [expanded_sections[i:i + 10] for i in range(0, len(expanded_sections), 10)]
@@ -58,8 +54,11 @@ async def analyze_legal_query(payload: QueryRequest):
         final_analysis = call_openrouter_final_summary(q, all_insights)
 
         # Step 6: Enrich final top sections
-        flat_sections = sum(chapter_grouped.values(), [])
-        enriched_sections = enrich_relevant_sections(final_analysis["relevant_sections"], flat_sections)
+        enriched_sections = enrich_relevant_sections(
+        final_analysis["relevant_sections"],
+        expanded_sections
+        )
+        enriched_sections = enrich_relevant_sections(final_analysis["relevant_sections"], enriched_sections)
 
         # Step 7: Return final structured JSON
         return {
