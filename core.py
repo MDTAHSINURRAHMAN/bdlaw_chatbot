@@ -125,6 +125,10 @@ def call_openrouter_final_summary(query: str, chunk_responses: list) -> dict:
 
     if response.status_code != 200:
         raise Exception(f"OpenRouter failed: {response.status_code} - {response.text}")
+    
+    # ✅ NEW: Check if response is empty
+    if not response.text.strip():
+        raise Exception("OpenRouter returned an empty response.")
 
     reply = response.json()['choices'][0]['message']['content']
     fixed = clean_gemini_json(reply)
