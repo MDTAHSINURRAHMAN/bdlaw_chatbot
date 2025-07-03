@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict
 import json
+import traceback
 from core import (
     semantic_search,
     get_all_sections_grouped_by_chapter_from_file,
@@ -68,4 +69,5 @@ async def analyze_legal_query(payload: QueryRequest):
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        traceback.print_exc()
+        return {"error": str(e)}
