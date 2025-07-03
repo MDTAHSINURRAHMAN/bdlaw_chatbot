@@ -79,7 +79,6 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.1.1
 python-jose==3.5.0
 python-multipart==0.0.20
-pywin32==310
 PyYAML==6.0.2
 qdrant-client==1.14.3
 regex==2024.11.6
