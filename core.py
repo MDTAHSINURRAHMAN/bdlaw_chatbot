@@ -195,23 +195,23 @@ def call_openrouter_chunk_analysis(query: str, sections: list) -> dict:
 
 
 
-def get_all_sections_grouped_by_chapter_from_file(filepath=None):
-    if filepath is None:
-        # 👇 Make sure this matches the location in the Render container
-        filepath = os.path.join(os.path.dirname(__file__), "bdlaws_merged.json")
+# def get_all_sections_grouped_by_chapter_from_file(filepath=None):
+#     if filepath is None:
+#         # 👇 Make sure this matches the location in the Render container
+#         filepath = os.path.join(os.path.dirname(__file__), "bdlaws_merged.json")
 
-    if not os.path.exists(filepath):
-        raise FileNotFoundError(f"JSON file missing at: {filepath}")
+#     if not os.path.exists(filepath):
+#         raise FileNotFoundError(f"JSON file missing at: {filepath}")
 
-    with open(filepath, "r", encoding="utf-8") as f:
-        all_sections = json.load(f)
+#     with open(filepath, "r", encoding="utf-8") as f:
+#         all_sections = json.load(f)
 
-    grouped = {}
-    for sec in all_sections:
-        chapter = sec.get("chapterTitle", "").strip()
-        grouped.setdefault(chapter, []).append(sec)
+#     grouped = {}
+#     for sec in all_sections:
+#         chapter = sec.get("chapterTitle", "").strip()
+#         grouped.setdefault(chapter, []).append(sec)
 
-    return grouped
+#     return grouped
 
 
 
@@ -258,12 +258,21 @@ def get_all_sections_grouped_by_chapter_from_file(filepath=None):
 
 #     return related_sections
 
-def expand_with_related_sections(top_matches: list, chapter_grouped: dict, neighbors: int = 10):
+def get_sections_by_chapter(chapter_title: str, limit: int = 10):
+    return client.scroll(
+        collection_name=COLLECTION_NAME,
+        scroll_filter=Filter(
+            must=[FieldCondition(key="chapterTitle", match=MatchValue(value=chapter_title))]
+        ),
+        limit=limit
+    )[0]
+
+
+def expand_with_related_sections(top_matches: list, neighbors: int = 10):
     related_sections = []
     seen_ids = set()
     MAX_PER_CHAPTER = 10
 
-    # 1. Top chapters
     top_chapters = []
     for match in top_matches:
         chap = match["payload"].get("chapterTitle", "").strip()
@@ -273,33 +282,15 @@ def expand_with_related_sections(top_matches: list, chapter_grouped: dict, neigh
             break
 
     for chap in top_chapters:
-        count = 0
-        for sec in chapter_grouped.get(chap, []):
-            sec_id = sec['sectionUrl']
+        chapter_sections = get_sections_by_chapter(chap, MAX_PER_CHAPTER)
+        for sec in chapter_sections:
+            sec_id = sec.payload['sectionUrl']
             if sec_id not in seen_ids:
-                related_sections.append(sec)
+                related_sections.append(sec.payload)
                 seen_ids.add(sec_id)
-                count += 1
-            if count >= MAX_PER_CHAPTER:
-                break
-
-    # 2. Optional fallback: ±neighbors from top 3
-    if len(related_sections) < 30:
-        all_flat = list(sum(chapter_grouped.values(), []))  # flatten
-        url_to_index = {s['sectionUrl']: idx for idx, s in enumerate(all_flat)}
-
-        for match in top_matches[:3]:
-            sec_id = match["payload"]["sectionUrl"]
-            idx = url_to_index.get(sec_id)
-            if idx is not None:
-                for i in range(max(0, idx - neighbors), min(len(all_flat), idx + neighbors + 1)):
-                    sec = all_flat[i]
-                    sec_id = sec['sectionUrl']
-                    if sec_id not in seen_ids:
-                        related_sections.append(sec)
-                        seen_ids.add(sec_id)
 
     return related_sections
+
 
 
 def get_relevance_score_openrouter(query: str, section_text: str) -> dict:
