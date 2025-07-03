@@ -19,30 +19,70 @@ COLLECTION_NAME = "bdlaws"
 # ✅ Qdrant connection
 client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
+
+def fetch_sections_from_qdrant_by_title(gemini_titles: list, top_k=1):
+    enriched = []
+
+    for entry in gemini_titles:
+        title_query = entry['title']
+
+        # 🔍 Vector search with title as query
+        try:
+            title_vector = embed_query(title_query)
+            results = client.search(
+                collection_name=COLLECTION_NAME,
+                query_vector=title_vector,
+                limit=top_k
+            )
+        except Exception as e:
+            print(f"❌ Qdrant search failed for: {title_query}\n{e}")
+            continue
+
+        if results:
+            best_match = results[0]
+            enriched.append({
+                "title": entry["title"],
+                "reason": entry["reason"],
+                "section": re.search(r"\((\d+[A-Za-z]*)\)", entry["title"]).group(1) if re.search(r"\((\d+[A-Za-z]*)\)", entry["title"]) else None,
+                **best_match.payload  # include all metadata fields like actTitle, text, etc.
+            })
+        else:
+            print(f"⚠️ No match found in Qdrant for: {title_query}")
+
+    return enriched
+
 def enrich_relevant_sections(relevant_sections: list, all_sections: list) -> list:
     enriched = []
 
     for entry in relevant_sections:
         raw_title = entry["title"].strip()
 
-        # ✅ Extract section number using regex (e.g., (Section 459))
+        # ✅ Extract section number (optional, may not exist)
         match = re.search(r"\(Section\s+(\d+[A-Za-z]*)\)", raw_title)
         section_number = match.group(1) if match else None
 
-        # ✅ Remove (Section XXX) from title
+        # ✅ Clean trailing section numbers or newline digits
         cleaned_title = re.sub(r"\s*\(Section\s+\d+[A-Za-z]*\)", "", raw_title).strip()
+        cleaned_title = re.sub(r"\n\d+\.*$", "", cleaned_title).strip()
 
-        # ✅ Split to get actTitle and sectionTitle
+        # ✅ Split act and section titles
         if ">" in cleaned_title:
             act_title, section_title = map(str.strip, cleaned_title.split(">", 1))
         else:
             act_title = ""
             section_title = cleaned_title
 
-        # ✅ Try to match based on sectionTitle and section number
         matched = None
+
         for sec in all_sections:
-            if sec['actTitle'].strip() == act_title and sec['sectionTitle'].strip() == section_title:
+            sec_act = sec['actTitle'].strip()
+            sec_title = sec['sectionTitle'].strip()
+
+            # Match more flexibly:
+            if (
+                sec_act.endswith(act_title) and
+                section_title.lower() in sec_title.lower()
+            ):
                 matched = sec
                 break
 
@@ -50,7 +90,7 @@ def enrich_relevant_sections(relevant_sections: list, all_sections: list) -> lis
             enriched.append({
                 "title": raw_title,
                 "reason": entry.get("reason"),
-                "section": section_number,  # ✅ new field
+                "section": section_number,
                 "actTitle": matched.get("actTitle"),
                 "sectionTitle": matched.get("sectionTitle"),
                 "chapterTitle": matched.get("chapterTitle"),
@@ -62,6 +102,8 @@ def enrich_relevant_sections(relevant_sections: list, all_sections: list) -> lis
                 "actDate": matched.get("actDate"),
                 "actSubtitle": matched.get("actSubtitle")
             })
+        else:
+            print(f"⚠️ Could not match: {raw_title}")
 
     return enriched
 
@@ -190,15 +232,15 @@ def call_openrouter_chunk_analysis(query: str, sections: list) -> dict:
 
 
 
-def get_all_sections_grouped_by_chapter_from_file(filepath="bdlaws_merged.json"):
-    with open(filepath, "r", encoding="utf-8") as f:
-        all_sections = json.load(f)
+def get_all_sections_grouped_by_chapter_from_qdrant(limit=10_000):
+    print("📡 Fetching all legal sections from Qdrant...")
+    all_sections, _ = client.scroll(collection_name=COLLECTION_NAME, limit=limit)
 
     grouped = {}
     for sec in all_sections:
-        chapter = sec.get("chapterTitle", "").strip()
-        grouped.setdefault(chapter, []).append(sec)
-
+        chapter = sec.payload.get("chapterTitle", "").strip()
+        grouped.setdefault(chapter, []).append(sec.payload)
+    
     return grouped
 
 
@@ -361,23 +403,24 @@ def semantic_search(query: str, top_k: int = 10):
     for hit in raw_results:
         section_text = hit.payload['text']
         score_data = get_relevance_score_openrouter(query, section_text)
-        scored_results.append({
+        scored_result = {
             "score": score_data['score'],
             "reason": score_data['reason'],
-            "payload": hit.payload
-        })
+            "payload": hit.payload  # full section
+        }
+        scored_results.append(scored_result)
+        
 
     # Sort by Gemini AI relevance score
     sorted_results = sorted(scored_results, key=lambda x: x["score"], reverse=True)
     return sorted_results
 
 
-
 # ✅ CLI test
 if __name__ == "__main__":
     q = input("Ask your legal question: ")
     top_matches = semantic_search(q)
-    chapter_grouped = get_all_sections_grouped_by_chapter_from_file()
+    chapter_grouped = get_all_sections_grouped_by_chapter_from_qdrant()
     expanded_sections = expand_with_related_sections(top_matches, chapter_grouped)
 
     print(f"\n🔍 Expanded Contextual Sections (Total: {len(expanded_sections)}):")
@@ -408,9 +451,8 @@ if __name__ == "__main__":
     
     # Flatten all sections from grouped chapters
     flat_sections = sum(chapter_grouped.values(), [])
-
     # Enrich Gemini's response with full metadata
-    enriched_sections = enrich_relevant_sections(final_analysis["relevant_sections"], flat_sections)
+    enriched_sections = fetch_sections_from_qdrant_by_title(final_analysis["relevant_sections"])
 
     # Optionally update final_analysis with enriched result
     final_analysis["relevant_sections_full"] = enriched_sections
