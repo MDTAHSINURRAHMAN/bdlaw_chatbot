@@ -193,13 +193,3 @@ If you’d like to collaborate or request changes, open an issue or contact via 
 ## License
 
 License not specified in repository. Add a `LICENSE` file to declare terms.
-
----
-
-If you'd like, I can also:
-
-- Add a minimal `tests/` harness and a couple of pytest tests for `core.py` helpers.
-- Add a `.env.example` with all environment variables required.
-- Add a lightweight Dockerfile for local containerized runs.
-
-Tell me which follow-up you'd like and I will implement it next.
